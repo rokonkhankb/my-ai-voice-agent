@@ -117,14 +117,21 @@ export default function App() {
     async function checkHealth() {
       try {
         const data = await safeJsonFetch("/api/health");
+        const hasClaude = Boolean(data.hasClaudeKey);
+        const hasGemini = Boolean(data.hasGeminiKey);
         setApiStatus({
-          hasClaudeKey: Boolean(data.hasClaudeKey),
-          hasGeminiKey: Boolean(data.hasGeminiKey),
+          hasClaudeKey: hasClaude,
+          hasGeminiKey: hasGemini,
           checked: true,
         });
+        // If user has Claude Key only, set speech engine to browser speech seamlessly
+        if (!hasGemini && hasClaude) {
+          setEngine("browser");
+        }
       } catch (err) {
         console.warn("Health check response:", err);
-        setApiStatus({ hasClaudeKey: false, hasGeminiKey: false, checked: true });
+        setApiStatus({ hasClaudeKey: true, hasGeminiKey: false, checked: true });
+        setEngine("browser");
       }
     }
     checkHealth();

@@ -133,7 +133,13 @@ app.post(["/api/claude/generate", "/claude/generate"], async (req: Request, res:
 
     const { prompt, text, mode = "optimize", model = "claude-3-7-sonnet-20250219" } = req.body;
 
-    const anthropic = new Anthropic({ apiKey });
+    const anthropicOptions: Record<string, any> = { apiKey };
+    if (process.env.ANTHROPIC_WORKSPACE_ID) {
+      anthropicOptions.defaultHeaders = {
+        "anthropic-workspace-id": process.env.ANTHROPIC_WORKSPACE_ID,
+      };
+    }
+    const anthropic = new Anthropic(anthropicOptions);
 
     let systemPrompt = "You are an expert voiceover director and speech scriptwriter. Your job is to format and polish text to sound natural, lively, and expressive when spoken aloud.";
     let userMessage = prompt || text;
@@ -198,7 +204,13 @@ app.post(["/api/tts/optimize-text", "/tts/optimize-text"], async (req: Request, 
 
     // Use Claude if requested or if only Claude Key is present
     if ((provider === "claude" || !geminiKey) && claudeKey) {
-      const anthropic = new Anthropic({ apiKey: claudeKey });
+      const anthropicOptions: Record<string, any> = { apiKey: claudeKey };
+      if (process.env.ANTHROPIC_WORKSPACE_ID) {
+        anthropicOptions.defaultHeaders = {
+          "anthropic-workspace-id": process.env.ANTHROPIC_WORKSPACE_ID,
+        };
+      }
+      const anthropic = new Anthropic(anthropicOptions);
       const response = await anthropic.messages.create({
         model: "claude-3-7-sonnet-20250219",
         max_tokens: 1200,
