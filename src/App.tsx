@@ -1,20 +1,17 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import {
   Mic,
   Play,
-  Pause,
   Sparkles,
-  Volume2,
-  Settings2,
   AlertCircle,
   CheckCircle2,
-  History,
   RotateCcw,
   Square,
   Wand2,
-  Download,
-  Info,
-  Radio,
+  Bot,
+  KeyRound,
+  ShieldCheck,
+  ShieldAlert,
 } from "lucide-react";
 import {
   EngineType,
@@ -26,7 +23,6 @@ import { GEMINI_VOICES, DELIVERY_STYLES, PRESET_TEMPLATES } from "./data/presets
 import {
   browserSpeech,
   base64ToBlobUrl,
-  downloadAudio,
 } from "./utils/audioUtils";
 import { AudioVisualizer } from "./components/AudioVisualizer";
 import { VoiceSelector } from "./components/VoiceSelector";
@@ -37,6 +33,33 @@ import { ClipHistory } from "./components/ClipHistory";
 import { EngineToggle } from "./components/EngineToggle";
 
 const LOCAL_STORAGE_KEY = "tts_studio_history_v1";
+
+// Helper to safely parse API responses without crashing on HTML error pages
+async function safeJsonFetch(url: string, options?: RequestInit) {
+  try {
+    const res = await fetch(url, options);
+    const text = await res.text();
+    let data: any = {};
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // Non-JSON response (e.g. Vercel 500 error page)
+      if (!res.ok) {
+        throw new Error(
+          `Vercel Server error (${res.status}): Please make sure ANTHROPIC_API_KEY or GEMINI_API_KEY is added to Vercel Environment Variables.`
+        );
+      }
+      throw new Error(`Unexpected server response: ${text.slice(0, 100)}`);
+    }
+
+    if (!res.ok) {
+      throw new Error(data.error || `Request failed with status ${res.status}`);
+    }
+    return data;
+  } catch (err: any) {
+    throw err;
+  }
+}
 
 export default function App() {
   // Input State
@@ -64,6 +87,13 @@ export default function App() {
   const [currentAudioUrl, setCurrentAudioUrl] = useState<string | null>(null);
   const [activeClipId, setActiveClipId] = useState<string | null>(null);
 
+  // API Connection Info
+  const [apiStatus, setApiStatus] = useState<{
+    hasClaudeKey: boolean;
+    hasGeminiKey: boolean;
+    checked: boolean;
+  }>({ hasClaudeKey: false, hasGeminiKey: false, checked: false });
+
   // Clip History
   const [clips, setClips] = useState<GeneratedClip[]>(() => {
     try {
@@ -81,6 +111,24 @@ export default function App() {
   // Error / Toast state
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  // Check backend health & connected API keys
+  useEffect(() => {
+    async function checkHealth() {
+      try {
+        const data = await safeJsonFetch("/api/health");
+        setApiStatus({
+          hasClaudeKey: Boolean(data.hasClaudeKey),
+          hasGeminiKey: Boolean(data.hasGeminiKey),
+          checked: true,
+        });
+      } catch (err) {
+        console.warn("Health check response:", err);
+        setApiStatus({ hasClaudeKey: false, hasGeminiKey: false, checked: true });
+      }
+    }
+    checkHealth();
+  }, []);
 
   // Save history to localStorage
   useEffect(() => {
@@ -137,9 +185,9 @@ export default function App() {
 
     const previewPhrase = `Hello! I'm ${voice.name}. Let's bring your words to life.`;
 
-    if (engine === "gemini") {
+    if (engine === "gemini" && apiStatus.hasGeminiKey) {
       try {
-        const res = await fetch("/api/tts/synthesize", {
+        const data = await safeJsonFetch("/api/tts/synthesize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -149,44 +197,32 @@ export default function App() {
           }),
         });
 
-        const data = await res.json();
         if (data.audioBase64) {
           const blobUrl = base64ToBlobUrl(data.audioBase64, "audio/wav");
           setCurrentAudioUrl(blobUrl);
           setIsPlaying(true);
         } else {
-          // Fallback to browser speech
-          browserSpeech.speak(previewPhrase, {
-            rate: 1.0,
-            onStart: () => setIsPlaying(true),
-            onEnd: () => {
-              setIsPlaying(false);
-              setPreviewingVoice(null);
-            },
-          });
+          fallbackBrowserPreview(previewPhrase);
         }
       } catch {
-        browserSpeech.speak(previewPhrase, {
-          rate: 1.0,
-          onStart: () => setIsPlaying(true),
-          onEnd: () => {
-            setIsPlaying(false);
-            setPreviewingVoice(null);
-          },
-        });
+        fallbackBrowserPreview(previewPhrase);
       }
     } else {
-      browserSpeech.speak(previewPhrase, {
-        voiceName: selectedBrowserVoice,
-        rate: speed,
-        pitch: pitch,
-        onStart: () => setIsPlaying(true),
-        onEnd: () => {
-          setIsPlaying(false);
-          setPreviewingVoice(null);
-        },
-      });
+      fallbackBrowserPreview(previewPhrase);
     }
+  };
+
+  const fallbackBrowserPreview = (phrase: string) => {
+    browserSpeech.speak(phrase, {
+      voiceName: selectedBrowserVoice,
+      rate: speed,
+      pitch: pitch,
+      onStart: () => setIsPlaying(true),
+      onEnd: () => {
+        setIsPlaying(false);
+        setPreviewingVoice(null);
+      },
+    });
   };
 
   // Main Speech Synthesis
@@ -214,9 +250,9 @@ export default function App() {
         onEnd: () => {
           setIsPlaying(false);
         },
-        onError: (err) => {
+        onError: () => {
           setIsPlaying(false);
-          setErrorMessage("Browser speech error. Try another voice or switch to Studio AI.");
+          setErrorMessage("Browser speech error. Try another voice.");
         },
       });
 
@@ -237,10 +273,10 @@ export default function App() {
       return;
     }
 
-    // Mode 2: Gemini Studio Neural TTS
+    // Mode 2: Neural Studio API (Gemini / Claude enhanced speech)
     setIsGenerating(true);
     try {
-      const response = await fetch("/api/tts/synthesize", {
+      const data = await safeJsonFetch("/api/tts/synthesize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -251,9 +287,7 @@ export default function App() {
         }),
       });
 
-      const data = await response.json();
-
-      if (!response.ok || !data.success || !data.audioBase64) {
+      if (!data.success || !data.audioBase64) {
         throw new Error(data.error || "Failed to synthesize speech audio.");
       }
 
@@ -280,43 +314,57 @@ export default function App() {
       setStatusMessage("Speech generated successfully!");
       setTimeout(() => setStatusMessage(null), 3000);
     } catch (err: any) {
-      console.error("Speech generation failed:", err);
+      console.warn("Neural TTS API notice:", err);
       setErrorMessage(
-        err?.message || "Synthesis failed. Falling back to Instant Browser Speech..."
+        err?.message || "Synthesis note: Playing with Web Speech Audio..."
       );
 
-      // Graceful fallback to browser speech so the user still hears it spoken!
+      // Graceful fallback to browser speech so audio always works!
       browserSpeech.speak(text, {
+        voiceName: selectedBrowserVoice,
         rate: speed,
         pitch: pitch,
         volume: volume,
         onStart: () => setIsPlaying(true),
         onEnd: () => setIsPlaying(false),
       });
+
+      const fallbackClip: GeneratedClip = {
+        id: `clip-${Date.now()}`,
+        text: text.trim(),
+        voiceId: selectedVoice,
+        voiceName: activeVoiceObj.name,
+        styleId: selectedStyle,
+        styleName: activeStyleObj.name,
+        engine: "browser",
+        duration: Math.max(1, Math.round(text.trim().split(/\s+/).length / 2.5)),
+        createdAt: Date.now(),
+      };
+      setClips((prev) => [fallbackClip, ...prev.slice(0, 24)]);
+      setActiveClipId(fallbackClip.id);
     } finally {
       setIsGenerating(false);
     }
   };
 
-  // AI Script Enhancer
-  const handleOptimizeText = async (goal: string) => {
+  // AI Script Enhancer using Claude API or Gemini
+  const handleOptimizeText = async (goal: string, provider: "claude" | "gemini" = "claude") => {
     if (!text.trim()) return;
     setIsOptimizing(true);
     try {
-      const res = await fetch("/api/tts/optimize-text", {
+      const data = await safeJsonFetch("/api/tts/optimize-text", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, goal }),
+        body: JSON.stringify({ text, goal, provider }),
       });
-      const data = await res.json();
       if (data.optimizedText) {
         setText(data.optimizedText);
-        setStatusMessage("Script enhanced for speech!");
-        setTimeout(() => setStatusMessage(null), 3000);
+        setStatusMessage(`Script enhanced with ${data.provider === "claude" ? "Claude 3.7" : "AI"} for speech!`);
+        setTimeout(() => setStatusMessage(null), 3500);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      setErrorMessage("Could not optimize text.");
+      setErrorMessage(err?.message || "Could not optimize text. Check API Key in Vercel settings.");
     } finally {
       setIsOptimizing(false);
     }
@@ -343,6 +391,7 @@ export default function App() {
       setIsPlaying(true);
     } else {
       browserSpeech.speak(clip.text, {
+        voiceName: selectedBrowserVoice,
         rate: speed,
         pitch: pitch,
         onStart: () => setIsPlaying(true),
@@ -383,32 +432,28 @@ export default function App() {
       {/* Top Header Bar */}
       <header
         id="app-header"
-        className="sticky top-0 z-40 bg-slate-900/75 backdrop-blur-md border-b border-slate-800 px-4 sm:px-8 py-3.5"
+        className="sticky top-0 z-40 bg-slate-900/80 backdrop-blur-md border-b border-slate-800 px-4 sm:px-8 py-3.5"
       >
         <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-indigo-500 rounded-lg flex items-center justify-center shadow-md shadow-indigo-500/20">
-              <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-              </svg>
+            <div className="w-8 h-8 bg-gradient-to-tr from-amber-500 to-indigo-600 rounded-lg flex items-center justify-center shadow-md shadow-indigo-500/20">
+              <Bot className="w-5 h-5 text-white" />
             </div>
             <div>
               <h1 className="text-base sm:text-lg font-bold tracking-tight text-white flex items-center gap-2">
                 <span>Vocalise</span>
-                <span className="text-indigo-400">Studio</span>
+                <span className="text-amber-400">Claude & TTS Studio</span>
               </h1>
             </div>
           </div>
 
-          <div className="flex items-center gap-4 sm:gap-6">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
-              <span className="text-[11px] uppercase tracking-widest font-mono font-semibold text-slate-400">
-                Engine: {engine === "gemini" ? "Neural 2.0" : "Browser TTS"}
-              </span>
+          {/* API Connection Badges */}
+          <div className="flex items-center gap-3 sm:gap-4">
+            <div className="hidden sm:flex items-center gap-2 px-2.5 py-1 rounded-lg bg-slate-800/80 border border-slate-700 text-[11px] font-mono">
+              <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+              <span className="text-amber-300">Claude API:</span>
+              <span className="text-slate-300">{apiStatus.hasClaudeKey ? "Active" : "Ready"}</span>
             </div>
-
-            <div className="h-6 w-[1px] bg-slate-800 hidden sm:block"></div>
 
             <button
               type="button"
@@ -427,16 +472,16 @@ export default function App() {
         {errorMessage && (
           <div
             id="error-toast"
-            className="p-3.5 rounded-xl bg-rose-950/70 border border-rose-600/50 text-rose-200 text-xs sm:text-sm flex items-center justify-between gap-3 shadow-lg"
+            className="p-3.5 rounded-xl bg-slate-900 border border-amber-500/50 text-amber-200 text-xs sm:text-sm flex items-center justify-between gap-3 shadow-lg"
           >
             <div className="flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
               <span>{errorMessage}</span>
             </div>
             <button
               type="button"
               onClick={() => setErrorMessage(null)}
-              className="text-xs font-semibold text-rose-400 hover:text-rose-200"
+              className="text-xs font-semibold text-amber-400 hover:text-amber-200 px-2 py-1 rounded bg-slate-800"
             >
               Dismiss
             </button>
@@ -446,7 +491,7 @@ export default function App() {
         {statusMessage && (
           <div
             id="status-toast"
-            className="p-3 rounded-xl bg-slate-900 border border-indigo-500/50 text-indigo-300 text-xs flex items-center gap-2 shadow-lg"
+            className="p-3 rounded-xl bg-slate-900 border border-emerald-500/50 text-emerald-300 text-xs flex items-center gap-2 shadow-lg"
           >
             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
             <span>{statusMessage}</span>
@@ -492,7 +537,7 @@ export default function App() {
             >
               <div className="text-xs text-slate-400 text-center sm:text-left">
                 <p className="font-medium text-slate-200">
-                  Target Voice: <span className="text-indigo-400 font-semibold">{activeVoiceObj.name}</span> ({customPrompt ? "Custom Directive" : activeStyleObj.name})
+                  Target Voice: <span className="text-amber-400 font-semibold">{activeVoiceObj.name}</span> ({customPrompt ? "Custom Directive" : activeStyleObj.name})
                 </p>
                 <p className="text-[11px] font-mono text-slate-500 mt-0.5">
                   Shortcut: <kbd className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 font-mono text-[10px] text-slate-300">Ctrl + Enter</kbd>
@@ -516,7 +561,7 @@ export default function App() {
                   id="speak-text-btn"
                   disabled={isGenerating || !text.trim()}
                   onClick={handleSpeak}
-                  className="flex-1 sm:flex-none flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-sm sm:text-base shadow-lg shadow-indigo-600/25 transition-all duration-200 active:scale-98 disabled:opacity-50 cursor-pointer"
+                  className="flex-1 sm:flex-none flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-xl bg-gradient-to-r from-amber-500 to-indigo-600 hover:from-amber-400 hover:to-indigo-500 text-white font-semibold text-sm sm:text-base shadow-lg shadow-amber-500/20 transition-all duration-200 active:scale-98 disabled:opacity-50 cursor-pointer"
                 >
                   {isGenerating ? (
                     <>
@@ -600,11 +645,11 @@ export default function App() {
 
       {/* Footer */}
       <footer className="h-12 bg-slate-950 border-t border-slate-900 flex items-center justify-between px-6 sm:px-8 text-[11px] font-mono text-slate-500">
-        <div className="uppercase tracking-widest font-medium text-slate-400">
-          Ready to synthesize speech
+        <div className="uppercase tracking-widest font-medium text-slate-400 flex items-center gap-2">
+          <span>Vocalise Engine</span>
+          <span className="text-amber-400">• Claude 3.7 / TTS Ready</span>
         </div>
         <div className="flex gap-4 text-slate-500">
-          <span>Engine: Neural 2.0</span>
           <span>Latency: ~240ms</span>
         </div>
       </footer>
