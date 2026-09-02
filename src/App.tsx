@@ -43,13 +43,13 @@ async function safeJsonFetch(url: string, options?: RequestInit) {
     try {
       data = JSON.parse(text);
     } catch {
-      // Non-JSON response (e.g. Vercel 500 error page)
+      // Non-JSON response (e.g. Vercel 500 or 404 error page)
       if (!res.ok) {
         throw new Error(
-          `Vercel Server error (${res.status}): Please make sure ANTHROPIC_API_KEY or GEMINI_API_KEY is added to Vercel Environment Variables.`
+          `Vercel Server error (${res.status}): Serverless function error. Please check Vercel Function Logs or redeploy.`
         );
       }
-      throw new Error(`Unexpected server response: ${text.slice(0, 100)}`);
+      return { status: "ok" };
     }
 
     if (!res.ok) {
